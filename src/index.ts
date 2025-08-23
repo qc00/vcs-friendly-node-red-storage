@@ -4,6 +4,7 @@ B: Node coordinates
 
 Additional handling:
 C: Adds offloaded files to git auto-commit
+D: Delete offloaded files for nodes that are deleted
 */
 
 import * as Path from "path";
@@ -115,6 +116,9 @@ const rules: {[nodeType: string]: {[prop: string]: string}} = {
   "ui_template": {"format": "htm"},
 };
 
+const offloadPathsByFlow: { [flowPath: string]: Set<string> } = {};
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 function shouldOffload(node: NodeWithOffload, prop: string, val: any) {
   if (!val) return false;
   if (typeof val !== 'string') {
@@ -133,9 +137,17 @@ util.writeFile = async (path, content, backupPath) => {
     const dir = Path.dirname(path);
     const allPromises: Promise<any>[] = [];
     const coord = [];
+    const oldPaths = offloadPathsByFlow[path] || EMPTY_SET; // Feature D
+    const newPaths = offloadPathsByFlow[path] = new Set();
 
     if (typeof content === 'string') {
       content = util.parseJSON(content);
+    }
+
+    function deleteOffload(p: string) {
+      allPromises.push(fs.unlink(p)
+        .then(() => addToGit.push(p))
+        .catch(_ => void 0));
     }
 
     for (const node of content as NodeWithOffload[]) {
@@ -151,13 +163,14 @@ util.writeFile = async (path, content, backupPath) => {
           if (shouldOffload(node, prop, val)) {
             allPromises.push(fs.writeFile(p, val));
             addToGit.push(p);
+            newPaths.add(p);
             (node._vcsOffload || (node._vcsOffload = [])).push(`${prop}.${ext}`);
             delete node[prop];
           } else {
-            allPromises.push(fs.unlink(p)
-              .then(() => addToGit.push(p))
-              .catch(_ => void 0));
+            deleteOffload(p);
           }
+
+          (oldPaths as Set<string>).delete(p);
         }
       }
 
@@ -167,6 +180,9 @@ util.writeFile = async (path, content, backupPath) => {
         delete node.x;
         delete node.y;
       }
+
+      // D:
+      oldPaths.forEach(deleteOffload);
     }
 
     allPromises.push(fs.writeFile(Path.join(dir, COORD_FILE), JSON.stringify(coord))); // Not added to git
@@ -192,7 +208,8 @@ util.readFile = async (path, backupPath, emptyResponse, type) => {
   const coordPromise = fs.readFile(Path.join(dir, COORD_FILE), 'utf8').then(util.parseJSON);
 
   const allPromises: Promise<any>[] = [];
-  const lookup: {[id: string]: NodeWithOffload} = {};
+  const lookup: {[id: string]: NodeWithOffload} = {}; // Feature B
+  const paths = offloadPathsByFlow[path] = new Set(); // Feature D
 
   // A:
   for (const node of data as NodeWithOffload[]) {
@@ -207,8 +224,9 @@ util.readFile = async (path, backupPath, emptyResponse, type) => {
           throw new Error(`Invalid offload path [${offload}] in node ${node.id}`);
         }
         const prop = offload.substring(0, offload.lastIndexOf('.'));
-        const promise = fs.readFile(Path.join(dir, `${node.id}.${offload}`), 'utf8').then(data => node[prop] = data);
-        allPromises.push(promise);
+        const path = Path.join(dir, `${node.id}.${offload}`);
+        allPromises.push(fs.readFile(path, 'utf8').then(data => node[prop] = data));
+        paths.add(path);
       };
 
       if (allPromises.length >= 10) {
