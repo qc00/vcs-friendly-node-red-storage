@@ -1,6 +1,6 @@
 {
   "name": "@qc00/vcs-friendly-node-red-storage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Node-RED stroage plug-in that stores the flow in formats more suitable for a version control system (VCS) e.g. git.",
   "main": "build/index.js",
   "types": "build/index.d.ts",

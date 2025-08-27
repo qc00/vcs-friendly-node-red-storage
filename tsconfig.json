@@ -3,6 +3,7 @@
         "outDir": "./build",
         "target": "es2020",
         "module": "commonjs",
+        "removeComments": true,
         "noImplicitReturns": true,
         "types": ["node"]
     },

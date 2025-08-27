@@ -5,6 +5,7 @@ B: Node coordinates
 Additional handling:
 C: Adds offloaded files to git auto-commit
 D: Delete offloaded files for nodes that are deleted
+E: One line per node if possible
 */
 
 import * as Path from "path";
@@ -139,6 +140,7 @@ util.writeFile = async (path, content, backupPath) => {
     const coord = [];
     const oldPaths = offloadPathsByFlow[path] || EMPTY_SET; // Feature D
     const newPaths = offloadPathsByFlow[path] = new Set();
+    const output: string[] = [];
 
     if (typeof content === 'string') {
       content = util.parseJSON(content);
@@ -183,11 +185,16 @@ util.writeFile = async (path, content, backupPath) => {
 
       // D:
       oldPaths.forEach(deleteOffload);
+
+      // E:
+      let json = JSON.stringify(node, null, 2);
+      if (json.length < 200) json = json.replace(/\n\s*/g, "");
+      output.push(json);
     }
 
     allPromises.push(fs.writeFile(Path.join(dir, COORD_FILE), JSON.stringify(coord))); // Not added to git
     await Promise.all(allPromises);
-    content = JSON.stringify(content, null, 4);
+    content = `[${output.join(",\n")}]`;
   }
   return originalWriteFile(path, content, backupPath);
 };
