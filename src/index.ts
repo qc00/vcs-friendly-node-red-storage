@@ -182,9 +182,9 @@ function offloadNamesOfNodesInTabs(nodes: NodeWithOffload[]): SafeNames {
   return suffixIdToCaseInsensitiveDuplicates(names);
 }
 
-// Offloads without a tab name are in the old format: named after the node id
 function offloadPath(dir: string, node: NodeWithOffload, offload: string) {
-  return Path.join(dir, offload.includes("/") ? offload : `${node.id}.${offload}`);
+  const isInTab = offload.includes("/");
+  return Path.join(dir, isInTab ? offload : `${node.id}.${offload}`);
 }
 
 const originalWriteFile = getOriginal(util.writeFile);
