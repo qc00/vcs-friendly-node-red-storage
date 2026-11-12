@@ -6,8 +6,7 @@ Additional handling:
 C: Adds offloaded files to git auto-commit
 D: Delete offloaded files for nodes that are deleted
 E: One line per node if possible
-F: Offloaded files are stored as <flow dir>/<tab label>/<node name>.<prop>.<ext> instead of <node id>.<prop>.<ext>
-   (id suffix only on name collisions). The legacy layout is still readable and is converted on the next deploy.
+F: Name offloaded files as <tab name>/<node name>
 */
 
 import * as Path from "path";
@@ -34,6 +33,7 @@ const COORD_FILE = "coord.json";
 
 interface NodeWithOffload extends Node {
   _vcsOffload?: string[];
+  label?: string;
   x?: number;
   y?: number;
 }
@@ -132,76 +132,59 @@ function shouldOffload(node: NodeWithOffload, prop: string, val: any) {
   return true;
 }
 
-// Naming (feature F)
-const GLOBAL_FOLDER = "_global";
-const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-const MAX_NAME_LENGTH = 80;
+type SafeName = string & { _safeName: never };
+type SafeNames = { [id: string]: SafeName };
 
-function sanitize(name: unknown, fallback: string): string {
-  function clean(str: string) {
-    return str
-      .replace(/[<>:"/\\|?*~\x00-\x1f\x7f]/g, "_")
-      .replace(/\.{2,}/g, ".")
-      .replace(/^[. ]+|[. ]+$/g, "");
-  }
-  let s = clean(typeof name === "string" ? name : "");
-  if (s.length > MAX_NAME_LENGTH) s = clean(s.substring(0, MAX_NAME_LENGTH));
-  if (!s) s = clean(fallback) || "_";
-  return RESERVED_NAME.test(s) ? "_" + s : s;
+function toSafeName(name: string | undefined, fallback: string): SafeName {
+  const safe = (name || "").substring(0, 80)
+    .replace(/[<>:"/\\|?*~\x00-\x1f]/g, "_")
+    .replace(/\.{2,}/g, ".")
+    .replace(/^[. ]+|[. ]+$/g, "")
+    .replace(/^(con|prn|aux|nul|com\d|lpt\d)(?=\.|$)/i, "$&_");
+  return (safe || fallback) as SafeName;
 }
 
-// Case-insensitive collisions: every member of a colliding group gets the id suffix
-function dedupe(items: { id: string, base: string }[]): Map<string, string> {
-  const groups = new Map<string, { id: string, base: string }[]>();
-  for (const item of items) {
-    const key = item.base.toLowerCase();
-    const group = groups.get(key);
-    if (group) group.push(item); else groups.set(key, [item]);
-  }
-  const out = new Map<string, string>();
-  for (const group of groups.values()) {
-    for (const { id, base } of group) {
-      out.set(id, group.length === 1 ? base : `${base}~${sanitize(id, "id")}`);
+function suffixIdToCaseInsensitiveDuplicates(names: SafeNames): SafeNames {
+  const out: SafeNames = Object.create(null);
+  const firstIds: { [lowerCaseName: string]: string } = Object.create(null);
+  const withId = (id: string) => `${names[id]}~${id}` as SafeName;
+
+  for (const id in names) {
+    const key = names[id].toLowerCase();
+    const firstId = firstIds[key];
+    if (firstId === undefined) {
+      firstIds[key] = id;
+      out[id] = names[id];
+    } else {
+      out[firstId] = withId(firstId);
+      out[id] = withId(id);
     }
   }
   return out;
 }
 
-// z (tab/subflow id) -> folder name
-function buildFolders(nodes: NodeWithOffload[]): Map<string, string> {
-  const globalId = "\0" + GLOBAL_FOLDER; // Cannot clash with a node id
-  const items = [{ id: globalId, base: GLOBAL_FOLDER }];
+function offloadNamesOfNodesInTabs(nodes: NodeWithOffload[]): SafeNames {
+  let tabs: SafeNames = Object.create(null);
   for (const node of nodes) {
-    if (node.type === "tab") {
-      items.push({ id: node.id, base: sanitize((node as any).label, node.type) });
-    } else if (node.type === "subflow") {
-      items.push({ id: node.id, base: sanitize(node.name, node.type) });
+    if (node.type === "tab" || node.type === "subflow") {
+      tabs[node.id] = toSafeName(node.label || node.name, node.type);
     }
   }
-  const folders = dedupe(items);
-  folders.set(globalId, GLOBAL_FOLDER); // Reserved: a tab labelled "_global" is the one that gets suffixed
-  return folders;
-}
+  tabs = suffixIdToCaseInsensitiveDuplicates(tabs);
 
-function folderOf(folders: Map<string, string>, node: NodeWithOffload): string {
-  return folders.get(node.z) ?? GLOBAL_FOLDER;
-}
-
-// node id -> file base name, unique per folder across all nodes with offload rules
-function buildFileBases(nodes: NodeWithOffload[], folders: Map<string, string>): Map<string, string> {
-  const byFolder = new Map<string, { id: string, base: string }[]>();
+  const names: SafeNames = Object.create(null);
   for (const node of nodes) {
-    if (!rules[node.type]) continue;
-    const folder = folderOf(folders, node);
-    const list = byFolder.get(folder);
-    const item = { id: node.id, base: sanitize(node.name, node.type) };
-    if (list) list.push(item); else byFolder.set(folder, [item]);
+    const tab = tabs[node.z];
+    if (tab && rules[node.type]) {
+      names[node.id] = `${tab}/${toSafeName(node.name, node.type)}` as SafeName;
+    }
   }
-  const out = new Map<string, string>();
-  for (const list of byFolder.values()) {
-    for (const [id, base] of dedupe(list)) out.set(id, base);
-  }
-  return out;
+  return suffixIdToCaseInsensitiveDuplicates(names);
+}
+
+// Offloads without a tab name are in the old format: named after the node id
+function offloadPath(dir: string, node: NodeWithOffload, offload: string) {
+  return Path.join(dir, offload.includes("/") ? offload : `${node.id}.${offload}`);
 }
 
 const originalWriteFile = getOriginal(util.writeFile);
@@ -210,37 +193,36 @@ util.writeFile = async (path, content, backupPath) => {
   if (path.endsWith(flowSuffix)) {
     log.info(`Processing flow file [${path}]`);
     const dir = Path.dirname(path);
+    const writes: [path: string, val: string][] = [];
     const coord = [];
     const oldPaths = offloadPathsByFlow[path] || EMPTY_SET; // Feature D
-    const newPaths = offloadPathsByFlow[path] = new Set<string>();
+    const newPaths = offloadPathsByFlow[path] = new Set();
     const output: string[] = [];
-    const writes: { p: string, val: string }[] = [];
 
     if (typeof content === 'string') {
       content = util.parseJSON(content);
     }
 
-    const nodes = content as NodeWithOffload[];
-    const folders = buildFolders(nodes); // Feature F
-    const bases = buildFileBases(nodes, folders);
+    const names = offloadNamesOfNodesInTabs(content as NodeWithOffload[]); // Feature F
 
-    for (const node of nodes) {
+    for (const node of content as NodeWithOffload[]) {
       // A:
       delete node._vcsOffload;
 
       const rule = rules[node.type];
       if (rule) {
         log.debug(`Processing ${node.type} node [${node.id}]`);
-        const folder = folderOf(folders, node);
         for (const [prop, ext] of Object.entries(rule)) {
           const val = node[prop];
           if (shouldOffload(node, prop, val)) {
-            const file = `${bases.get(node.id)}.${prop}.${ext}`;
-            const p = Path.join(dir, folder, file);
-            writes.push({ p, val });
+            const name: SafeName | undefined = names[node.id];
+            const offload = name ? `${name}.${prop}.${ext}` : `${prop}.${ext}`;
+            const p = offloadPath(dir, node, offload);
+            writes.push([p, val]);
             addToGit.push(p);
             newPaths.add(p);
-            (node._vcsOffload || (node._vcsOffload = [])).push(`${folder}/${file}`);
+            (oldPaths as Set<string>).delete(p);
+            (node._vcsOffload || (node._vcsOffload = [])).push(offload);
             delete node[prop];
           }
         }
@@ -259,20 +241,15 @@ util.writeFile = async (path, content, backupPath) => {
       output.push(json);
     }
 
-    // D: Delete stale files (including the legacy <id>.<prop>.<ext> ones) first, then the folders they emptied, and
-    // only then create folders and write. This order matters on case-insensitive file systems (tab foo -> Foo).
-    const stale = [...oldPaths].filter(p => !newPaths.has(p));
-    await Promise.all(stale.map(p => fs.unlink(p)
-      .then(() => { addToGit.push(p); })
-      .catch(_ => void 0)));
-    const staleDirs = new Set(stale.map(p => Path.dirname(p)));
-    staleDirs.delete(dir); // Never the flow directory itself
-    await Promise.all([...staleDirs].map(d => fs.rmdir(d).catch(_ => void 0)));
+    // D: Finish deleting before writing, as a renamed file may be the same file on a case-insensitive file system
+    const deleted = [...oldPaths];
+    await Promise.all(deleted.map(p => fs.unlink(p).then(() => addToGit.push(p), _ => void 0)));
+    const emptied = new Set(deleted.map(p => Path.dirname(p)));
+    emptied.delete(dir);
+    await Promise.all([...emptied].map(tabDir => fs.rmdir(tabDir).catch(_ => void 0)));
 
-    const targetDirs = new Set(writes.map(w => Path.dirname(w.p)));
-    await Promise.all([...targetDirs].map(d => fs.mkdir(d, { recursive: true })));
     await Promise.all([
-      ...writes.map(w => fs.writeFile(w.p, w.val)),
+      ...writes.map(([p, val]) => fs.mkdir(Path.dirname(p), { recursive: true }).then(() => fs.writeFile(p, val))),
       fs.writeFile(Path.join(dir, COORD_FILE), JSON.stringify(coord)), // Not added to git
     ]);
     content = `[${output.join(",\n")}]`;
@@ -284,32 +261,6 @@ util.writeFile = async (path, content, backupPath) => {
 // #endregion
 
 // #region util.readFile
-// Resolves a _vcsOffload entry: "<folder>/<file>" (feature F) or the legacy "<prop>.<ext>" (file named <id>.<entry>)
-function resolveOffload(dir: string, node: NodeWithOffload, entry: string): { path: string, prop: string } {
-  const invalid = () => new Error(`Invalid offload path [${entry}] in node ${node.id}`);
-  if (typeof entry !== "string") throw invalid();
-
-  let path: string;
-  let basename: string;
-  if (entry.includes("/")) {
-    const segments = entry.split("/");
-    if (entry.includes("\\") || Path.isAbsolute(entry) || segments.some(s => s === "" || s === "." || s === "..")) {
-      throw invalid();
-    }
-    path = Path.join(dir, ...segments);
-    basename = segments[segments.length - 1];
-  } else {
-    if (entry.includes("..")) throw invalid();
-    path = Path.join(dir, `${node.id}.${entry}`);
-    basename = entry;
-  }
-
-  const parts = basename.split(".");
-  const prop = parts[parts.length - 2];
-  if (!prop) throw invalid();
-  return { path, prop };
-}
-
 const originalReadFile = getOriginal(util.readFile);
 
 util.readFile = async (path, backupPath, emptyResponse, type) => {
@@ -334,7 +285,11 @@ util.readFile = async (path, backupPath, emptyResponse, type) => {
 
     if (node._vcsOffload) {
       for (const offload of node._vcsOffload) {
-        const { path, prop } = resolveOffload(dir, node, offload);
+        if (offload.includes("..")) {
+          throw new Error(`Invalid offload path [${offload}] in node ${node.id}`);
+        }
+        const [prop] = offload.split(".").slice(-2);
+        const path = offloadPath(dir, node, offload);
         allPromises.push(fs.readFile(path, 'utf8').then(data => node[prop] = data));
         paths.add(path);
       };
