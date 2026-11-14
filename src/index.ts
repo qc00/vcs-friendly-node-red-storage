@@ -161,7 +161,7 @@ function dedup(names: SafeNames): SafeNames {
   return out;
 }
 
-function offloadNamesOfNodesInTabs(nodes: NodeWithOffload[]): SafeNames {
+function offloadNames(nodes: NodeWithOffload[]): SafeNames {
   let tabs: SafeNames = Object.create(null);
   for (const node of nodes) {
     if (node.type === "tab" || node.type === "subflow") {
@@ -172,17 +172,11 @@ function offloadNamesOfNodesInTabs(nodes: NodeWithOffload[]): SafeNames {
 
   const names: SafeNames = Object.create(null);
   for (const node of nodes) {
-    const tab = tabs[node.z];
-    if (tab && rules[node.type]) {
-      names[node.id] = `${tab}/${toSafeName(node.name, node.type)}` as SafeName;
+    if (rules[node.type]) {
+      names[node.id] = `${tabs[node.z] ?? "."}/${toSafeName(node.name, node.type)}` as SafeName;
     }
   }
   return dedup(names);
-}
-
-function offloadPath(dir: string, node: NodeWithOffload, offload: string) {
-  const isInTab = offload.includes("/");
-  return Path.join(dir, isInTab ? offload : `${node.id}.${offload}`);
 }
 
 const originalWriteFile = getOriginal(util.writeFile);
@@ -198,7 +192,7 @@ util.writeFile = async (path, content, backupPath) => {
     const output: string[] = [];
 
     const nodes: NodeWithOffload[] = typeof content === 'string' ? util.parseJSON(content) : content;
-    const names = offloadNamesOfNodesInTabs(nodes); // Feature F
+    const names = offloadNames(nodes); // Feature F
 
     for (const node of nodes) {
       // A:
@@ -210,9 +204,8 @@ util.writeFile = async (path, content, backupPath) => {
         for (const [prop, ext] of Object.entries(rule)) {
           const val = node[prop];
           if (shouldOffload(node, prop, val)) {
-            const name = names[node.id];
-            const offload = name ? `${name}.${prop}.${ext}` : `${prop}.${ext}`;
-            const p = offloadPath(dir, node, offload);
+            const offload = `${names[node.id]}.${prop}.${ext}`;
+            const p = Path.join(dir, offload);
             writes.push([p, val]);
             addToGit.push(p);
             newPaths.add(p);
@@ -280,7 +273,8 @@ util.readFile = async (path, backupPath, emptyResponse, type) => {
           throw new Error(`Invalid offload path [${offload}] in node ${node.id}`);
         }
         const [prop] = offload.split(".").slice(-2);
-        const path = offloadPath(dir, node, offload);
+        const isNamedAfterId = !offload.includes("/");
+        const path = Path.join(dir, isNamedAfterId ? `${node.id}.${offload}` : offload);
         allPromises.push(fs.readFile(path, 'utf8').then(data => node[prop] = data));
         paths.add(path);
       };
