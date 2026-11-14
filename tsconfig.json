@@ -5,6 +5,7 @@
         "module": "commonjs",
         "removeComments": true,
         "noImplicitReturns": true,
+        "noUncheckedIndexedAccess": true,
         "types": ["node"]
     },
     "include": [

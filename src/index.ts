@@ -6,6 +6,7 @@ Additional handling:
 C: Adds offloaded files to git auto-commit
 D: Delete offloaded files for nodes that are deleted
 E: One line per node if possible
+F: Name offloaded files as <tab name>/<node name>
 */
 
 import * as Path from "path";
@@ -32,6 +33,7 @@ const COORD_FILE = "coord.json";
 
 interface NodeWithOffload extends Node {
   _vcsOffload?: string[];
+  label?: string;
   x?: number;
   y?: number;
 }
@@ -130,29 +132,69 @@ function shouldOffload(node: NodeWithOffload, prop: string, val: any) {
   return true;
 }
 
+type SafeName = string & { _safeName: never };
+type SafeNames = { [id: string]: SafeName };
+
+function toSafeName(name: string | undefined, type: string): SafeName {
+  const safe = (name || "").substring(0, 80)
+    .replace(/[<>:"/\\|?*~\x00-\x1f]/g, "_")
+    .replace(/\.{2,}/g, ".")
+    .replace(/^[. ]+|[. ]+$/g, "")
+    .replace(/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i, "$1_$2");
+  return (safe || type) as SafeName;
+}
+
+function dedup(names: SafeNames): SafeNames {
+  const out: SafeNames = Object.create(null);
+  const firstIds: { [lowerCaseName: string]: string } = Object.create(null);
+  const withId = (id: string) => `${names[id]}-${id}` as SafeName;
+
+  for (const [id, name] of Object.entries(names)) {
+    const firstId = (firstIds[name.toLowerCase()] ??= id);
+    if (firstId === id) {
+      out[id] = name;
+    } else {
+      out[firstId] = withId(firstId);
+      out[id] = withId(id);
+    }
+  }
+  return out;
+}
+
+function offloadNames(nodes: NodeWithOffload[]): SafeNames {
+  let tabs: SafeNames = Object.create(null);
+  for (const node of nodes) {
+    if (node.type === "tab" || node.type === "subflow") {
+      tabs[node.id] = toSafeName(node.label || node.name, node.type);
+    }
+  }
+  tabs = dedup(tabs);
+
+  const names: SafeNames = Object.create(null);
+  for (const node of nodes) {
+    if (rules[node.type]) {
+      names[node.id] = `${tabs[node.z] ?? "."}/${toSafeName(node.name, node.type)}` as SafeName;
+    }
+  }
+  return dedup(names);
+}
+
 const originalWriteFile = getOriginal(util.writeFile);
 
 util.writeFile = async (path, content, backupPath) => {
   if (path.endsWith(flowSuffix)) {
     log.info(`Processing flow file [${path}]`);
     const dir = Path.dirname(path);
-    const allPromises: Promise<any>[] = [];
+    const writes: [path: string, val: string][] = [];
     const coord = [];
     const oldPaths = offloadPathsByFlow[path] || EMPTY_SET; // Feature D
-    const newPaths = offloadPathsByFlow[path] = new Set();
+    const newPaths = offloadPathsByFlow[path] = new Set<string>();
     const output: string[] = [];
 
-    if (typeof content === 'string') {
-      content = util.parseJSON(content);
-    }
+    const nodes: NodeWithOffload[] = typeof content === 'string' ? util.parseJSON(content) : content;
+    const names = offloadNames(nodes); // Feature F
 
-    function deleteOffload(p: string) {
-      allPromises.push(fs.unlink(p)
-        .then(() => addToGit.push(p))
-        .catch(_ => void 0));
-    }
-
-    for (const node of content as NodeWithOffload[]) {
+    for (const node of nodes) {
       // A:
       delete node._vcsOffload;
 
@@ -160,19 +202,16 @@ util.writeFile = async (path, content, backupPath) => {
       if (rule) {
         log.debug(`Processing ${node.type} node [${node.id}]`);
         for (const [prop, ext] of Object.entries(rule)) {
-          const p = Path.join(dir, `${node.id}.${prop}.${ext}`);
           const val = node[prop];
           if (shouldOffload(node, prop, val)) {
-            allPromises.push(fs.writeFile(p, val));
+            const offload = `${names[node.id]}.${prop}.${ext}`;
+            const p = Path.join(dir, offload);
+            writes.push([p, val]);
             addToGit.push(p);
             newPaths.add(p);
-            (node._vcsOffload || (node._vcsOffload = [])).push(`${prop}.${ext}`);
+            (node._vcsOffload || (node._vcsOffload = [])).push(offload);
             delete node[prop];
-          } else {
-            deleteOffload(p);
           }
-
-          (oldPaths as Set<string>).delete(p);
         }
       }
 
@@ -183,17 +222,20 @@ util.writeFile = async (path, content, backupPath) => {
         delete node.y;
       }
 
-      // D:
-      oldPaths.forEach(deleteOffload);
-
       // E:
       let json = JSON.stringify(node, null, 2);
       if (json.length < 200) json = json.replace(/\n\s*/g, "");
       output.push(json);
     }
 
-    allPromises.push(fs.writeFile(Path.join(dir, COORD_FILE), JSON.stringify(coord))); // Not added to git
-    await Promise.all(allPromises);
+    // D: Finish deleting before writing, as a renamed file may be the same file on a case-insensitive file system
+    const stale = [...oldPaths].filter(p => !newPaths.has(p));
+    await Promise.all(stale.map(p => fs.unlink(p).then(() => addToGit.push(p), _ => void 0)));
+
+    await Promise.all([
+      ...writes.map(([p, val]) => fs.mkdir(Path.dirname(p), { recursive: true }).then(() => fs.writeFile(p, val))),
+      fs.writeFile(Path.join(dir, COORD_FILE), JSON.stringify(coord)), // Not added to git
+    ]);
     content = `[${output.join(",\n")}]`;
   }
   return originalWriteFile(path, content, backupPath);
@@ -230,8 +272,9 @@ util.readFile = async (path, backupPath, emptyResponse, type) => {
         if (offload.includes("..")) {
           throw new Error(`Invalid offload path [${offload}] in node ${node.id}`);
         }
-        const prop = offload.substring(0, offload.lastIndexOf('.'));
-        const path = Path.join(dir, `${node.id}.${offload}`);
+        const [prop] = offload.split(".").slice(-2);
+        const isNamedAfterId = !offload.includes("/");
+        const path = Path.join(dir, isNamedAfterId ? `${node.id}.${offload}` : offload);
         allPromises.push(fs.readFile(path, 'utf8').then(data => node[prop] = data));
         paths.add(path);
       };
