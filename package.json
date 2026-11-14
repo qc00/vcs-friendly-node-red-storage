@@ -4,6 +4,9 @@
   "description": "A Node-RED stroage plug-in that stores the flow in formats more suitable for a version control system (VCS) e.g. git.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
+  "files": [
+    "build"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/qc00/vcs-friendly-node-red-storage.git"
