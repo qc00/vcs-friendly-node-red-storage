@@ -135,26 +135,24 @@ function shouldOffload(node: NodeWithOffload, prop: string, val: any) {
 type SafeName = string & { _safeName: never };
 type SafeNames = { [id: string]: SafeName };
 
-function toSafeName(name: string | undefined, fallback: string): SafeName {
+function toSafeName(name: string | undefined, type: string): SafeName {
   const safe = (name || "").substring(0, 80)
     .replace(/[<>:"/\\|?*~\x00-\x1f]/g, "_")
     .replace(/\.{2,}/g, ".")
     .replace(/^[. ]+|[. ]+$/g, "")
-    .replace(/^(con|prn|aux|nul|com\d|lpt\d)(?=\.|$)/i, "$&_");
-  return (safe || fallback) as SafeName;
+    .replace(/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i, "$1_$2");
+  return (safe || type) as SafeName;
 }
 
-function suffixIdToCaseInsensitiveDuplicates(names: SafeNames): SafeNames {
+function dedup(names: SafeNames): SafeNames {
   const out: SafeNames = Object.create(null);
   const firstIds: { [lowerCaseName: string]: string } = Object.create(null);
-  const withId = (id: string) => `${names[id]}~${id}` as SafeName;
+  const withId = (id: string) => `${names[id]}-${id}` as SafeName;
 
-  for (const id in names) {
-    const key = names[id].toLowerCase();
-    const firstId = firstIds[key];
-    if (firstId === undefined) {
-      firstIds[key] = id;
-      out[id] = names[id];
+  for (const [id, name] of Object.entries(names)) {
+    const firstId = (firstIds[name.toLowerCase()] ??= id);
+    if (firstId === id) {
+      out[id] = name;
     } else {
       out[firstId] = withId(firstId);
       out[id] = withId(id);
@@ -170,7 +168,7 @@ function offloadNamesOfNodesInTabs(nodes: NodeWithOffload[]): SafeNames {
       tabs[node.id] = toSafeName(node.label || node.name, node.type);
     }
   }
-  tabs = suffixIdToCaseInsensitiveDuplicates(tabs);
+  tabs = dedup(tabs);
 
   const names: SafeNames = Object.create(null);
   for (const node of nodes) {
@@ -179,7 +177,7 @@ function offloadNamesOfNodesInTabs(nodes: NodeWithOffload[]): SafeNames {
       names[node.id] = `${tab}/${toSafeName(node.name, node.type)}` as SafeName;
     }
   }
-  return suffixIdToCaseInsensitiveDuplicates(names);
+  return dedup(names);
 }
 
 function offloadPath(dir: string, node: NodeWithOffload, offload: string) {
@@ -196,16 +194,13 @@ util.writeFile = async (path, content, backupPath) => {
     const writes: [path: string, val: string][] = [];
     const coord = [];
     const oldPaths = offloadPathsByFlow[path] || EMPTY_SET; // Feature D
-    const newPaths = offloadPathsByFlow[path] = new Set();
+    const newPaths = offloadPathsByFlow[path] = new Set<string>();
     const output: string[] = [];
 
-    if (typeof content === 'string') {
-      content = util.parseJSON(content);
-    }
+    const nodes: NodeWithOffload[] = typeof content === 'string' ? util.parseJSON(content) : content;
+    const names = offloadNamesOfNodesInTabs(nodes); // Feature F
 
-    const names = offloadNamesOfNodesInTabs(content as NodeWithOffload[]); // Feature F
-
-    for (const node of content as NodeWithOffload[]) {
+    for (const node of nodes) {
       // A:
       delete node._vcsOffload;
 
@@ -215,13 +210,12 @@ util.writeFile = async (path, content, backupPath) => {
         for (const [prop, ext] of Object.entries(rule)) {
           const val = node[prop];
           if (shouldOffload(node, prop, val)) {
-            const name: SafeName | undefined = names[node.id];
+            const name = names[node.id];
             const offload = name ? `${name}.${prop}.${ext}` : `${prop}.${ext}`;
             const p = offloadPath(dir, node, offload);
             writes.push([p, val]);
             addToGit.push(p);
             newPaths.add(p);
-            (oldPaths as Set<string>).delete(p);
             (node._vcsOffload || (node._vcsOffload = [])).push(offload);
             delete node[prop];
           }
@@ -242,11 +236,8 @@ util.writeFile = async (path, content, backupPath) => {
     }
 
     // D: Finish deleting before writing, as a renamed file may be the same file on a case-insensitive file system
-    const deleted = [...oldPaths];
-    await Promise.all(deleted.map(p => fs.unlink(p).then(() => addToGit.push(p), _ => void 0)));
-    const emptied = new Set(deleted.map(p => Path.dirname(p)));
-    emptied.delete(dir);
-    await Promise.all([...emptied].map(tabDir => fs.rmdir(tabDir).catch(_ => void 0)));
+    const stale = [...oldPaths].filter(p => !newPaths.has(p));
+    await Promise.all(stale.map(p => fs.unlink(p).then(() => addToGit.push(p), _ => void 0)));
 
     await Promise.all([
       ...writes.map(([p, val]) => fs.mkdir(Path.dirname(p), { recursive: true }).then(() => fs.writeFile(p, val))),
