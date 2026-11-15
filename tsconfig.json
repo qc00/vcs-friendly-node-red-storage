@@ -9,6 +9,6 @@
         "types": ["node"]
     },
     "include": [
-        "src/*"
+        "src/**/*"
     ]
 }
