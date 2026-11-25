@@ -1,6 +1,6 @@
-import type { Node } from "node-red";
+import type { NodeDef } from "node-red";
 
-export interface NodeWithOffload extends Node {
+export interface NodeWithOffload extends NodeDef {
   _vcsOffload?: string[];
   label?: string;
   x?: number;
@@ -8,8 +8,10 @@ export interface NodeWithOffload extends Node {
 }
 
 export const rules: {[nodeType: string]: {[prop: string]: string}} = {
-  "function": {"func": "js", "initialize": "js"},
-  "ui_template": {"format": "htm"},
+  "typescript-config": { "tsconfig": "json" },
+  "typescript": { "func": "ts", "initialize": "ts", "finalize": "ts", "code": "ts", "declare": "d.ts" },
+  "function": {"func": "js", "initialize": "js", "finalize": "js"},
+  "ui_template": { "format": "htm" },
 };
 
 export type SafeName = string & { _safeName: never };

@@ -2,7 +2,7 @@
   "name": "@qc00/vcs-friendly-node-red-storage",
   "version": "0.2.0",
   "description": "A Node-RED storage plug-in that stores the flow in formats more suitable for a version control system (VCS) e.g. git.",
-  "main": "build/index.js",
+  "main": "dist/index.js",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/qc00/vcs-friendly-node-red-storage.git"
@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --test \"build-test/test/**/*.test.js\"",
-    "clean": "rm -rf build build-test",
+    "clean": "rm -rf dist build-test",
     "prepack": "npm run clean && npm run build"
   },
   "devDependencies": {
@@ -30,11 +30,11 @@
   "node-red": {
     "version": ">=4.1.0",
     "nodes": {
-      "vcs-friendly-node-red-storage": "build/index.js"
+      "vcs-friendly-node-red-storage": "dist/index.js"
     }
   },
   "files": [
-    "build"
+    "dist"
   ],
   "publishConfig": {
     "access": "public"

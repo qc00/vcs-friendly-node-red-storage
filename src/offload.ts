@@ -1,12 +1,12 @@
 /* Parts that are offloaded (stored outside the flow file):
-A: Use configurable properties
+A: User-configurable properties
 B: Node coordinates
 
 Additional handling:
 C: Adds offloaded files to git auto-commit
 D: Delete offloaded files for nodes that are deleted
 E: One line per node if possible
-F: Name offloaded files as <tab name>/<node name>
+F: Name offloaded files as <tab name>/<node name>[-dedup hash] (see offload_naming.ts)
 */
 
 import * as Path from "path";
